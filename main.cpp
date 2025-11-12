@@ -11,12 +11,12 @@
 #include <windows.h> // For Sleep function
 
 // --- ANSI Color Codes ---
-#define BG_WALL "\033[40m"       // Red background
-#define BG_PATH "\033[0m"        // Green background
+#define BG_WALL "\033[40m"       // Black background
+#define BG_PATH "\033[0m"        // Default/Reset (no background)
 #define BG_VISITED "\033[43m"    // Yellow background
 #define C_PLAYER "\033[97;44m"   // White on Blue
 #define C_OPPONENT "\033[97;41m" // White on Red
-#define C_EXIT "\033[0m"         // White on Green
+#define C_EXIT "\033[0m"         // Default/Reset (no background)
 #define C_START "\033[97;44m"    // White on Blue
 #define RESET "\033[0m"
 
@@ -102,7 +102,7 @@ void renderGame(const vector<vector<char>> &maze, Position player, Position oppo
         cout << endl;
     }
 
-    cout << "\033[" << displayGrid.size() + 1 << "A";
+    cout << "\033[" << displayGrid.size() << "A";
     cout << "\033[" << displayGrid[0].size() * 2 << "D";
 }
 
@@ -174,19 +174,19 @@ vector<vector<char>> generateMaze(int width, int height, Position &start, Positi
     }
 
     // --- ENHANCED: Create more open spaces and alternative routes ---
-
+    
     // 1. Remove walls to create larger open areas (rooms)
     int roomsToCreate = (width * height) / 150; // Create several rooms
     std::uniform_int_distribution<> distX(3, width - 4);
     std::uniform_int_distribution<> distY(3, height - 4);
-
+    
     for (int r = 0; r < roomsToCreate; ++r)
     {
         int roomX = distX(g);
         int roomY = distY(g);
         int roomWidth = 3 + (g() % 4);  // 3-6 wide
         int roomHeight = 3 + (g() % 3); // 3-5 tall
-
+        
         for (int y = roomY; y < min(roomY + roomHeight, height - 1); ++y)
         {
             for (int x = roomX; x < min(roomX + roomWidth, width - 1); ++x)
@@ -205,20 +205,16 @@ vector<vector<char>> generateMaze(int width, int height, Position &start, Positi
     {
         int rx = 1 + (g() % (width - 2));
         int ry = 1 + (g() % (height - 2));
-
+        
         // Only remove walls that have paths on both sides
         if (maze[ry][rx] == '#')
         {
             int pathCount = 0;
-            if (rx > 0 && maze[ry][rx - 1] == ' ')
-                pathCount++;
-            if (rx < width - 1 && maze[ry][rx + 1] == ' ')
-                pathCount++;
-            if (ry > 0 && maze[ry - 1][rx] == ' ')
-                pathCount++;
-            if (ry < height - 1 && maze[ry + 1][rx] == ' ')
-                pathCount++;
-
+            if (rx > 0 && maze[ry][rx - 1] == ' ') pathCount++;
+            if (rx < width - 1 && maze[ry][rx + 1] == ' ') pathCount++;
+            if (ry > 0 && maze[ry - 1][rx] == ' ') pathCount++;
+            if (ry < height - 1 && maze[ry + 1][rx] == ' ') pathCount++;
+            
             // If there are paths nearby, open this wall
             if (pathCount >= 2)
             {
@@ -253,7 +249,12 @@ void handleInput(const vector<vector<char>> &maze, Position &player)
     if (!_kbhit())
         return;
 
-    char input = _getch();
+    // Flush keyboard buffer - only get the LAST key pressed
+    char input = 0;
+    while (_kbhit())
+    {
+        input = _getch();
+    }
 
     Position nextPos = player;
 
@@ -339,6 +340,130 @@ Position getNextStepBFS(const vector<vector<char>> &maze, Position start, Positi
     return step;
 }
 
+/**
+ * @brief Calculates Manhattan distance between two positions
+ */
+int manhattanDistance(Position a, Position b)
+{
+    return abs(a.x - b.x) + abs(a.y - b.y);
+}
+
+/**
+ * @brief Bot AI that tries to avoid the opponent while reaching the exit
+ * Uses A* with danger zones around the opponent
+ */
+Position getBotNextMove(const vector<vector<char>> &maze, Position bot, Position opponent, Position exit)
+{
+    // If we're at the exit, don't move
+    if (bot == exit)
+        return bot;
+
+    // Priority queue: (priority, position)
+    // Lower priority = better path
+    priority_queue<pair<int, Position>, vector<pair<int, Position>>, greater<pair<int, Position>>> pq;
+    map<Position, Position> parent;
+    map<Position, int> cost; // g-cost (actual cost from start)
+    map<Position, bool> visited;
+
+    pq.push({0, bot});
+    cost[bot] = 0;
+    parent[bot] = bot;
+
+    Position pathFoundEnd;
+    bool pathFound = false;
+
+    int dirs[4][2] = {{0, 1}, {0, -1}, {1, 0}, {-1, 0}};
+
+    while (!pq.empty())
+    {
+        Position current = pq.top().second;
+        pq.pop();
+
+        if (visited[current])
+            continue;
+        visited[current] = true;
+
+        if (current == exit)
+        {
+            pathFound = true;
+            pathFoundEnd = current;
+            break;
+        }
+
+        for (int i = 0; i < 4; ++i)
+        {
+            Position next = {current.x + dirs[i][0], current.y + dirs[i][1]};
+
+            if (next.x > 0 && next.x < maze[0].size() - 1 &&
+                next.y > 0 && next.y < maze.size() - 1 &&
+                maze[next.y][next.x] != '#' &&
+                !visited[next])
+            {
+                // Calculate danger penalty based on distance to opponent
+                int distToOpponent = manhattanDistance(next, opponent);
+                int dangerPenalty = 0;
+
+                // Heavy penalty for being close to opponent
+                if (distToOpponent <= 2)
+                    dangerPenalty = 100; // Very dangerous
+                else if (distToOpponent <= 4)
+                    dangerPenalty = 50; // Dangerous
+                else if (distToOpponent <= 6)
+                    dangerPenalty = 20; // Slightly dangerous
+
+                // g-cost: actual cost to reach this node
+                int newCost = cost[current] + 1 + dangerPenalty;
+
+                // Only update if we found a better path
+                if (cost.find(next) == cost.end() || newCost < cost[next])
+                {
+                    cost[next] = newCost;
+                    parent[next] = current;
+
+                    // f-cost = g-cost + h-cost (heuristic to exit)
+                    int hCost = manhattanDistance(next, exit);
+                    int fCost = newCost + hCost;
+
+                    pq.push({fCost, next});
+                }
+            }
+        }
+    }
+
+    if (!pathFound)
+    {
+        // If no path found, try to move away from opponent
+        Position best = bot;
+        int maxDist = manhattanDistance(bot, opponent);
+
+        for (int i = 0; i < 4; ++i)
+        {
+            Position next = {bot.x + dirs[i][0], bot.y + dirs[i][1]};
+
+            if (next.x > 0 && next.x < maze[0].size() - 1 &&
+                next.y > 0 && next.y < maze.size() - 1 &&
+                maze[next.y][next.x] != '#')
+            {
+                int dist = manhattanDistance(next, opponent);
+                if (dist > maxDist)
+                {
+                    maxDist = dist;
+                    best = next;
+                }
+            }
+        }
+        return best;
+    }
+
+    // Backtrack to find the first step
+    Position step = pathFoundEnd;
+    while (parent.find(step) != parent.end() && parent[step] != bot)
+    {
+        step = parent[step];
+    }
+    return step;
+}
+
 void updateOpponent(const vector<vector<char>> &maze, Position player, Position &opponent)
 {
     opponent = getNextStepBFS(maze, opponent, player);
@@ -360,21 +485,83 @@ int main()
 
     bool gameOver = false;
     bool gameWon = false;
+    int gameTick = 0; // Counter for game ticks
+    bool botMode = false;
+    bool modeSelected = false;
 
     cout << "=== MAZE CHASE ===" << endl;
-    cout << "Use Arrow Keys or WASD to move" << endl;
+    cout << "Press 'B' to watch BOT play" << endl;
+    cout << "Press Arrow Keys or WASD to play as HUMAN" << endl;
     cout << "Reach the EXIT (E) before the OPPONENT (O) catches you!" << endl;
-    cout << "Press any key to start..." << endl;
-    _getch();
-    system("cls");
 
     // Main Game Loop
     while (!gameOver && !gameWon)
     {
         renderGame(maze, player, opponent, start, exit);
+        
+        // Mode selection on first input
+        if (!modeSelected)
+        {
+            if (_kbhit())
+            {
+                char input = 0;
+                // Flush buffer and get last key
+                while (_kbhit())
+                {
+                    input = _getch();
+                }
 
-        handleInput(maze, player);
-        updateOpponent(maze, player, opponent);
+                if (input == 'b' || input == 'B')
+                {
+                    botMode = true;
+                    modeSelected = true;
+                }
+                else if (input == 72 || input == 80 || input == 75 || input == 77 || // Arrow keys
+                         input == 'w' || input == 'W' || input == 's' || input == 'S' ||
+                         input == 'a' || input == 'A' || input == 'd' || input == 'D')
+                {
+                    botMode = false;
+                    modeSelected = true;
+                    // Process this first input for player movement
+                    Position nextPos = player;
+                    if (input == 72 || input == 'w' || input == 'W')
+                        nextPos.y--;
+                    else if (input == 80 || input == 's' || input == 'S')
+                        nextPos.y++;
+                    else if (input == 75 || input == 'a' || input == 'A')
+                        nextPos.x--;
+                    else if (input == 77 || input == 'd' || input == 'D')
+                        nextPos.x++;
+
+                    if (nextPos.x > 0 && nextPos.x < maze[0].size() - 1 &&
+                        nextPos.y > 0 && nextPos.y < maze.size() - 1 &&
+                        maze[nextPos.y][nextPos.x] != '#')
+                    {
+                        player = nextPos;
+                    }
+                }
+            }
+        }
+        else
+        {
+            // Game mode is selected, play accordingly
+            if (botMode)
+            {
+                // Bot moves every tick
+                player = getBotNextMove(maze, player, opponent, exit);
+            }
+            else
+            {
+                // Human player controls
+                handleInput(maze, player);
+            }
+        }
+        
+        // Opponent only moves every 4 ticks (slower) and only after mode is selected
+        if (modeSelected && gameTick % 1 == 0)
+        {
+            updateOpponent(maze, player, opponent);
+        }
 
         if (player == opponent)
         {
@@ -385,7 +572,8 @@ int main()
             gameWon = true;
         }
 
-        Sleep(150); // Windows Sleep function (milliseconds)
+        gameTick++;
+        Sleep(75); // Half of 150ms = faster game updates
     }
 
     renderGame(maze, player, opponent, start, exit);
@@ -395,14 +583,28 @@ int main()
     if (gameWon)
     {
         cout << C_PLAYER << "********************" << RESET << endl;
-        cout << C_PLAYER << "**   YOU WIN!     **" << RESET << endl;
+        if (botMode)
+        {
+            cout << C_PLAYER << "**   BOT WINS!    **" << RESET << endl;
+        }
+        else
+        {
+            cout << C_PLAYER << "**   YOU WIN!     **" << RESET << endl;
+        }
         cout << C_PLAYER << "**  ESCAPED!      **" << RESET << endl;
         cout << C_PLAYER << "********************" << RESET << endl;
     }
     else
     {
         cout << C_OPPONENT << "********************" << RESET << endl;
-        cout << C_OPPONENT << "**  GAME OVER!    **" << RESET << endl;
+        if (botMode)
+        {
+            cout << C_OPPONENT << "**  BOT CAUGHT!   **" << RESET << endl;
+        }
+        else
+        {
+            cout << C_OPPONENT << "**  GAME OVER!    **" << RESET << endl;
+        }
         cout << C_OPPONENT << "**   CAUGHT!      **" << RESET << endl;
         cout << C_OPPONENT << "********************" << RESET << endl;
     }
